@@ -1,94 +1,65 @@
 # Financial Data Extractor
 
-## Structure
+A Streamlit app for pulling financial statements from SEC EDGAR and
+exporting them to Excel.
+
+## Features
+
+- **Financial Statement Extraction** — select companies, a filing type
+  (10-Q/10-K), and a period per company; extract Income Statement,
+  Cash Flow Statement, and Balance Sheet as a single `.zip`.
+- **Historical Financials** — pick a company and a starting fiscal
+  year; download every 10-Q and 10-K income statement from that year
+  to the present, one sheet per filing, in a single workbook.
+- **Companies List** — read-only view of tracked companies, their
+  latest reported quarter, and next expected earnings date.
+
+## Project structure
 
 ```
 financial_data_extractor/
-├── app.py                          # UI + orchestration (Home / Historical Financials / Companies List)
-├── sec_financials.py               # SEC EDGAR: identity, filing lookup, cleaning, earnings-date lookup
-├── companies_db.py                 # SQLite-backed company list — managed locally via CLI
+├── app.py                          # Streamlit UI
+├── sec_financials.py               # EDGAR fetching, cleaning, earnings lookups
+├── companies_db.py                 # SQLite company database + CLI
 ├── historical_finance/
-│   └── income_statement.py         # Multi-year 10-Q/10-K income statement extractor
+│   └── income_statement.py         # Multi-year income statement extractor
 └── requirements.txt
 ```
 
-## Companies database
-
-Companies live in a local SQLite file, `companies.db` (schema:
-`symbol` as primary key, `company_name` — no separate id column, since
-symbol is already unique), auto-created on first run via
-`companies_db.init_db()` (called from `sec_financials.init()`).
-
-**Managed entirely from the command line — not through the Streamlit
-UI.** The "Companies List" sidebar page is read-only. This is
-deliberate: once deployed to Streamlit Community Cloud, the server's
-filesystem is ephemeral, so writes made through a running app wouldn't
-persist anyway. Manage the list locally instead:
-
-```bash
-python companies_db.py
-```
-This opens an interactive menu — list, add, or remove a company by
-following the numbered prompts.
-
-Then push the updated `companies.db` alongside your code, or upload it
-directly if deploying separately from git.
-
-## Companies List page (in-app)
-
-Read-only table: Company Name, Symbol, Latest Earning Period (most
-recent reported quarter), and Next Earning Date (upcoming earnings
-date) — both looked up live via `yfinance`, cached for an hour. Shows
-`-` for either column if that data isn't available for the symbol.
-
-## Navigation
-
-Sidebar has three entries:
-- **Home** — the main flow (Select Companies → Filing Type/Period → Extract).
-  Extraction pulls Income Statement, Cash Flow Statement, and Balance
-  Sheet for each selected filing, bundled into one `.zip`.
-- **Historical Financials** — pick a company (from the database) and a
-  starting fiscal year, then download a multi-year Income Statement
-  workbook: one sheet per 10-Q/10-K filing from that year onward,
-  sorted newest to oldest (`historical_finance/income_statement.py`).
-  Balance Sheet and Cash Flow Statement downloads are placeholders for
-  now — clicking either just shows "under development".
-- **Companies List** — view companies + their latest/next earnings info.
-
-## Local setup
+## Setup
 
 ```bash
 pip install -r requirements.txt
 streamlit run app.py
 ```
 
-`historical_finance/income_statement.py` can also be run standalone,
-independent of the app, for testing:
+Before running, open `sec_financials.py` and update the identity string
+in `init()` — SEC EDGAR requires a name and email on every request.
+
+## Managing companies
+
+Companies are stored in `companies.db`, managed entirely through the
+command line:
+
 ```bash
-python historical_finance/income_statement.py
+python companies_db.py
 ```
 
-**Before running**, open `sec_financials.py` and change the
-`set_identity(...)` line inside `init()` to your own name and email —
-SEC EDGAR requires this on every request.
+Add a company by symbol only — both the display name and fiscal year
+end month are looked up automatically via `yfinance`. The same tool
+lets you remove a company, list all companies, or refresh existing
+entries.
+
+The in-app "Companies List" page is read-only by design: Streamlit
+Community Cloud's filesystem is ephemeral, so changes made through a
+deployed app wouldn't persist. Update `companies.db` locally and push
+it with your code.
 
 ## Deploying to Streamlit Community Cloud
 
-1. Manage `companies.db` locally first (see above), so it already has
-   the companies you want before deploying.
-2. Push this folder — including `companies.db` — to a GitHub repo.
-3. On share.streamlit.io, create a new app pointing at `app.py`.
-4. Deploy.
+1. Set up `companies.db` locally (see above).
+2. Push the project, including `companies.db`, to a GitHub repo.
+3. Create a new app on share.streamlit.io pointing at `app.py`.
 
 To update the company list later, update `companies.db` locally and
-push again — the deployed app can't write to it directly.
-
-## Downloading files
-
-There's no local-folder-picker on Cloud (the server has no access to
-your filesystem, and no display to pop up a native dialog). Instead,
-after extraction you get one `⬇️ Download` button — clicking it hands
-a `.zip` to your browser, which saves it to your Downloads folder or
-prompts you for a location, exactly like downloading anything else
-from a website. This works the same way whether you're running locally
-or on Cloud.# SEC_Financial_Statements
+push again.
