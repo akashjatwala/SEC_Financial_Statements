@@ -1,45 +1,12 @@
 import os
 import sqlite3
+
 import pandas as pd
+import yfinance as yf
 
-# ==================================================================
-# Companies database (SQLite)
-#
-# Single flat table: symbol (primary key), company_name,
-# fiscal_year_end_month. No separate id column — symbol is naturally
-# unique, so it's the key everywhere (add, remove, lookup).
-#
-# fiscal_year_end_month is stored as a 3-letter abbreviation ("Jan"
-# .. "Dec") — the calendar month a company's fiscal year ends in, e.g.
-# Apple = "Sep", most companies use the standard calendar year =
-# "Dec". This is what lets a filing date later be translated into a
-# fiscal quarter label (Q1/Q2/etc.) instead of just a calendar date.
-#
-# Note on deleting rows: SQLite doesn't leave a "blank row" behind
-# after a DELETE — the row is fully gone from every query, the same
-# as it would be in any relational database. The only thing a DELETE
-# doesn't do automatically is shrink the .db file back down (freed
-# space goes into an internal free-list for reuse, not back to the
-# OS) — that's a disk-space detail, not something that ever shows up
-# as an empty row. remove_company_by_symbol() runs VACUUM immediately
-# after each delete anyway, so the file itself stays fully compacted.
-#
-# The Streamlit app only reads this (read-only "Companies List" page —
-# Streamlit Cloud's filesystem is ephemeral, so writes made through a
-# deployed app wouldn't persist anyway). All add/remove management is
-# done locally by running this file directly:
-#
-#   python companies_db.py
-#
-# which opens an interactive menu (list / add / remove). Then push the
-# updated companies.db alongside your code.
-# ==================================================================
-
-# Anchored to this file's own directory (the project root), not the
-# current working directory — otherwise running a script from a
-# subfolder (e.g. historical_finance/income_statement.py invoked with
-# that as cwd) would silently create/read a second, empty companies.db
-# inside that subfolder instead of the real one.
+# Anchored to this file's location (the project root), not the current
+# working directory, so it resolves correctly regardless of where a
+# script is run from.
 DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "companies.db")
 
 _MONTH_ABBREVIATIONS = [
@@ -49,12 +16,7 @@ _MONTH_ABBREVIATIONS = [
 
 
 def _normalize_month(value) -> str:
-    """
-    Accepts '9', 'sep', 'SEP', or 'September' and returns the
-    canonical 3-letter form ('Sep'), or None if it isn't a valid month.
-    Numeric input is accepted mainly so any leftover data from before
-    this MMM-format change still converts cleanly.
-    """
+    """Accepts '9', 'sep', or 'September' and returns the canonical 'Sep' form, or None if invalid."""
     if value is None:
         return None
     text = str(value).strip()
@@ -70,11 +32,29 @@ def _normalize_month(value) -> str:
 
 
 def month_number(abbreviation) -> int:
-    """'Sep' (or '9', 'september', etc.) -> 9. Returns None if invalid."""
+    """'Sep' -> 9. Returns None if invalid."""
     normalized = _normalize_month(abbreviation)
-    if normalized is None:
+    return _MONTH_ABBREVIATIONS.index(normalized) + 1 if normalized else None
+
+
+def _fetch_company_name(symbol: str) -> str:
+    """Look up a company's display name via yfinance. Returns None if unavailable."""
+    try:
+        info = yf.Ticker(symbol).info
+        return info.get("longName") or info.get("shortName")
+    except Exception:
         return None
-    return _MONTH_ABBREVIATIONS.index(normalized) + 1
+
+
+def _fetch_fiscal_year_end_month(symbol: str) -> str:
+    """Derive fiscal year end month from the most recent column of yfinance's annual financials."""
+    try:
+        financials = yf.Ticker(symbol).financials
+        if financials is not None and not financials.empty:
+            return _MONTH_ABBREVIATIONS[financials.columns[0].month - 1]
+    except Exception:
+        pass
+    return None
 
 
 def _get_connection() -> sqlite3.Connection:
@@ -82,14 +62,7 @@ def _get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """
-    Create the companies table if it doesn't exist yet. Safe to call
-    multiple times. Also migrates an existing companies.db:
-      - adds fiscal_year_end_month (default 'Dec') if the column is
-        missing entirely (pre-fiscal-year-tracking database), or
-      - converts any leftover numeric values (from before the switch
-        to MMM format) into their 'Jan'..'Dec' equivalent.
-    """
+    """Create the companies table if it doesn't exist. Safe to call multiple times."""
     conn = _get_connection()
     conn.execute(
         """
@@ -101,23 +74,6 @@ def init_db() -> None:
         """
     )
     conn.commit()
-
-    existing_columns = [row[1] for row in conn.execute("PRAGMA table_info(companies)").fetchall()]
-    if "fiscal_year_end_month" not in existing_columns:
-        conn.execute("ALTER TABLE companies ADD COLUMN fiscal_year_end_month TEXT NOT NULL DEFAULT 'Dec'")
-        conn.commit()
-    else:
-        rows = conn.execute("SELECT symbol, fiscal_year_end_month FROM companies").fetchall()
-        for symbol, value in rows:
-            if value is not None and str(value).strip().isdigit():
-                normalized = _normalize_month(value)
-                if normalized:
-                    conn.execute(
-                        "UPDATE companies SET fiscal_year_end_month = ? WHERE symbol = ?",
-                        (normalized, symbol),
-                    )
-        conn.commit()
-
     conn.close()
 
 
@@ -143,11 +99,10 @@ def get_company(symbol: str):
     """Return {'Company Name', 'Symbol', 'Fiscal Year End Month'} for one symbol, or None if not found."""
     symbol = symbol.strip().upper()
     conn = _get_connection()
-    cursor = conn.execute(
+    row = conn.execute(
         "SELECT company_name, symbol, fiscal_year_end_month FROM companies WHERE UPPER(symbol) = ?",
         (symbol,),
-    )
-    row = cursor.fetchone()
+    ).fetchone()
     conn.close()
 
     if row is None:
@@ -155,13 +110,19 @@ def get_company(symbol: str):
     return {"Company Name": row[0], "Symbol": row[1], "Fiscal Year End Month": row[2]}
 
 
-def add_company(company_name: str, symbol: str, fiscal_year_end_month: str = "Dec") -> tuple:
-    """Insert a company. Returns (success: bool, message: str)."""
-    company_name = company_name.strip()
+def resolve_company_details(symbol: str) -> tuple:
+    """Try to fetch company name and fiscal year end month via yfinance. Returns (name_or_None, month_or_None)."""
     symbol = symbol.strip().upper()
+    return _fetch_company_name(symbol), _fetch_fiscal_year_end_month(symbol)
 
-    if not company_name or not symbol:
-        return False, "Company name and symbol are both required."
+
+def add_company(symbol: str, company_name: str, fiscal_year_end_month: str) -> tuple:
+    """Insert a company with an explicit name and fiscal year end month. Returns (success, message)."""
+    symbol = symbol.strip().upper()
+    company_name = (company_name or "").strip()
+
+    if not symbol or not company_name:
+        return False, "Symbol and company name are both required."
 
     normalized_month = _normalize_month(fiscal_year_end_month)
     if normalized_month is None:
@@ -181,12 +142,32 @@ def add_company(company_name: str, symbol: str, fiscal_year_end_month: str = "De
         conn.close()
 
 
+def refresh_companies() -> list:
+    """Re-fetch every existing company's name and fiscal year end month via yfinance. Returns [(symbol, name_or_None, month_or_None, success)]."""
+    conn = _get_connection()
+    symbols = [row[0] for row in conn.execute("SELECT symbol FROM companies").fetchall()]
+
+    results = []
+    for symbol in symbols:
+        name = _fetch_company_name(symbol)
+        month = _fetch_fiscal_year_end_month(symbol)
+        if name and month:
+            conn.execute(
+                "UPDATE companies SET company_name = ?, fiscal_year_end_month = ? WHERE symbol = ?",
+                (name, month, symbol),
+            )
+        results.append((symbol, name, month, bool(name and month)))
+
+    conn.commit()
+    conn.close()
+    return results
+
+
 def remove_company_by_symbol(symbol: str) -> tuple:
     """Remove a company by symbol (case-insensitive), then reclaim the freed disk space."""
     symbol = symbol.strip().upper()
     conn = _get_connection()
-    cursor = conn.execute("SELECT company_name FROM companies WHERE UPPER(symbol) = ?", (symbol,))
-    match = cursor.fetchone()
+    match = conn.execute("SELECT company_name FROM companies WHERE UPPER(symbol) = ?", (symbol,)).fetchone()
     if match is None:
         conn.close()
         return False, f"No company found with symbol '{symbol}'."
@@ -196,9 +177,8 @@ def remove_company_by_symbol(symbol: str) -> tuple:
     conn.commit()
     conn.close()
 
-    # VACUUM rebuilds the file with the deleted row's space reclaimed.
-    # Needs its own connection, run after the delete's transaction is
-    # already committed and closed.
+    # VACUUM reclaims the deleted row's disk space; run in its own
+    # connection, after the delete's transaction has been committed.
     vacuum_conn = _get_connection()
     vacuum_conn.execute("VACUUM")
     vacuum_conn.close()
@@ -207,15 +187,12 @@ def remove_company_by_symbol(symbol: str) -> tuple:
 
 
 # ==================================================================
-# Interactive menu — run with no arguments for a simple numbered menu
-# instead of remembering command syntax.
+# Interactive CLI menu
 # ==================================================================
+
 def _print_companies() -> None:
     df = load_companies()
-    if df.empty:
-        print("No companies in the database.")
-    else:
-        print(df.to_string(index=False))
+    print("No companies in the database." if df.empty else df.to_string(index=False))
 
 
 def _run_interactive_menu() -> None:
@@ -225,21 +202,28 @@ def _run_interactive_menu() -> None:
         print("1. List companies")
         print("2. Add a company")
         print("3. Remove a company")
-        print("4. Exit")
+        print("4. Refresh companies from yfinance")
+        print("5. Exit")
 
-        choice = input("Choose an option (1-4): ").strip()
+        choice = input("Choose an option (1-5): ").strip()
 
         if choice == "1":
             print()
             _print_companies()
 
         elif choice == "2":
-            name = input("Company Name: ").strip()
             symbol = input("Symbol: ").strip()
-            month_input = input("Fiscal Year End Month (e.g. Sep, blank = Dec): ").strip()
-            fiscal_year_end_month = month_input if month_input else "Dec"
+            company_name, fiscal_year_end_month = resolve_company_details(symbol)
 
-            ok, message = add_company(name, symbol, fiscal_year_end_month)
+            if not company_name:
+                print(f"Could not fetch a company name for '{symbol}' via yfinance.")
+                company_name = input("Enter company name manually: ").strip()
+
+            if not fiscal_year_end_month:
+                print(f"Could not determine a fiscal year end month for '{symbol}' via yfinance.")
+                fiscal_year_end_month = input("Enter fiscal year end month manually (e.g. Sep): ").strip()
+
+            ok, message = add_company(symbol, company_name, fiscal_year_end_month)
             print(message)
 
         elif choice == "3":
@@ -254,11 +238,17 @@ def _run_interactive_menu() -> None:
             print(message)
 
         elif choice == "4":
+            print("\nRefreshing companies from yfinance...")
+            for symbol, name, month, ok in refresh_companies():
+                print(f"{symbol}: {name}, fiscal year ends in {month}" if ok else f"{symbol}: could not refresh")
+            print("Done refreshing.")
+
+        elif choice == "5":
             print("Done.")
             break
 
         else:
-            print("Not a valid option — enter a number from 1 to 4.")
+            print("Not a valid option — enter a number from 1 to 5.")
 
 
 if __name__ == "__main__":
