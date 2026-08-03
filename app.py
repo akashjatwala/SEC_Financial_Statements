@@ -5,7 +5,7 @@ import pandas as pd
 
 import sec_financials
 import companies_db
-from historical_finance import income_statement
+from historical_finance import utils, income_statement, balance_sheet, cash_flow_statement
 
 st.set_page_config(page_title="Financial Data Extractor", page_icon="📊", layout="centered")
 sec_financials.init()
@@ -16,7 +16,6 @@ if "page" not in st.session_state:
 # ==================================================================
 # Sidebar
 # ==================================================================
-st.sidebar.title("Menu")
 
 if st.sidebar.button("📊 Financial Statement Extraction", width='stretch'):
     st.session_state.page = "home"
@@ -47,10 +46,10 @@ This app pulls financial statements directly from SEC EDGAR and lets you export 
 select a filing period per company, then extract. Produces a `.zip` with three workbooks:
 Income Statement, Cash Flow Statement, and Balance Sheet.
 
-**Historical Financials** — pick a company and a starting fiscal year, then download a
-single workbook covering every 10-Q and 10-K filed from that year to the present — one
-sheet per filing, newest to oldest. Currently available for the Income Statement; Balance
-Sheet and Cash Flow Statement are in development.
+**Historical Financials** — pick a company and a starting fiscal year, then download
+Income Statement, Balance Sheet, or Cash Flow Statement as a single workbook covering
+every 10-Q and 10-K filed from that year to the present — one sheet per filing, newest
+to oldest.
 
 **Companies List** — a read-only view of every company in the database, along with their
 latest reported quarter and next expected earnings date.
@@ -121,7 +120,7 @@ elif st.session_state.page == "historical_financials":
             fiscal_year_end_month = companies_db.month_number(company_row["Fiscal Year End Month"])
 
             try:
-                available_years = income_statement.get_available_years(symbol)
+                available_years = utils.get_available_years(symbol)
             except Exception as e:
                 st.warning(f"Could not fetch filing years for {symbol}: {e}")
 
@@ -160,7 +159,7 @@ elif st.session_state.page == "historical_financials":
             )
 
         # Rendered outside the columns above, so these span the full width.
-        if clicked_income:
+        def _handle_download(statement_label, extract_fn, filename_suffix):
             progress_bar = st.progress(0)
             status_text = st.empty()
 
@@ -169,7 +168,7 @@ elif st.session_state.page == "historical_financials":
                 progress_bar.progress(current / total if total else 1.0)
 
             try:
-                workbook_bytes, sheet_names = income_statement.extract_income_statements(
+                workbook_bytes, sheet_names = extract_fn(
                     symbol, fiscal_year_end_month, selected_year, on_progress=_update_progress
                 )
             except Exception as e:
@@ -180,22 +179,25 @@ elif st.session_state.page == "historical_financials":
             status_text.empty()
 
             if workbook_bytes:
-                st.success(f"Income Statements from {selected_year} is ready.")
+                st.success(f"{statement_label} from {selected_year} is ready.")
                 st.download_button(
                     "⬇️ Download",
                     data=workbook_bytes,
-                    file_name=f"{symbol}_Income_Statements.xlsx",
+                    file_name=f"{symbol}_{filename_suffix}.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                     width='stretch',
                 )
             elif workbook_bytes is None and not sheet_names:
                 st.error("No data extracted.")
 
+        if clicked_income:
+            _handle_download("Income Statements", income_statement.extract_income_statements, "Income_Statements")
+
         if clicked_balance:
-            st.info("This section is under development.")
+            _handle_download("Balance Sheets", balance_sheet.extract_balance_sheets, "Balance_Sheets")
 
         if clicked_cashflow:
-            st.info("This section is under development.")
+            _handle_download("Cash Flow Statements", cash_flow_statement.extract_cashflow_statements, "Cash_Flow_Statements")
 
 # ==================================================================
 # Financial Statement Extraction
