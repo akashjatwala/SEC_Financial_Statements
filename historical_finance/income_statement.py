@@ -1,146 +1,18 @@
-"""
-Historical Income Statement Extractor (10-Q and 10-K).
-
-Public API, used by app.py's "Historical Financials" page:
-  - get_available_years(symbol)
-  - extract_income_statements(symbol, fiscal_year_end_month, selected_year)
-
-Given a starting fiscal year, fetches every 10-Q/10-K filing from that
-year through the latest available, cleans each income statement, and
-combines them into one Excel workbook — one sheet per filing, sorted
-newest to oldest. 10-Q sheets have their YTD columns stripped (10-K
-has no such split); every sheet's column headers are reformatted to
-'MMM YYYY', and 10-K sheet names get a " (FY)" suffix.
-
-NOTE: _extract_date_from_header() is a heuristic against expected
-EDGAR/XBRL header text, not yet verified against a live filing —
-adjust if real data doesn't match. YTD columns are dropped by matching
-"ytd" literally in the column header.
-"""
-
-import re
-
-import pandas as pd
+"""Historical Income Statement Extractor (10-Q and 10-K)."""
 
 import sec_financials
+from historical_finance import utils
 
 
-def _adjusted_date(raw_date) -> pd.Timestamp:
-    """Shift back one month if day-of-month is 1-7 (EDGAR filing dates sometimes land just after period-end)."""
-    ts = pd.Timestamp(raw_date)
-    return ts - pd.offsets.MonthBegin(1) if ts.day <= 7 else ts
-
-
-def format_period_label(filing_date) -> str:
-    return _adjusted_date(filing_date).strftime("%b %Y")
-
-
-def _extract_date_from_header(header_text) -> pd.Timestamp:
-    """Pull a date out of a raw statement column header, e.g. 'Three Months Ended March 28, 2026'."""
-    match = re.search(r"([A-Za-z]+\.?\s+\d{1,2},?\s+\d{4}|\d{4}-\d{2}-\d{2})", str(header_text))
-    if not match:
-        return None
-    try:
-        return pd.Timestamp(match.group(1))
-    except (ValueError, TypeError):
-        return None
-
-
-def reformat_statement_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Rename the current/prior-period columns (2nd and 3rd) to 'MMM YYYY'."""
-    if df is None or df.empty or len(df.columns) < 2:
-        return df
-
-    df = df.copy()
-    rename_map = {}
-    for col in df.columns[1:3]:
-        parsed = _extract_date_from_header(col)
-        if parsed is not None:
-            rename_map[col] = format_period_label(parsed)
-    return df.rename(columns=rename_map)
-
-
-def fetch_income_statement(filing) -> pd.DataFrame:
+def fetch_income_statement(filing):
     return filing.xbrl().statements.income_statement(view="detailed").to_dataframe()
 
 
-def remove_ytd_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Drop columns whose header mentions 'YTD', keeping the label column and everything else."""
-    if df is None or df.empty:
-        return df
-
-    keep_cols = [df.columns[0]]
-    for col in df.columns[1:]:
-        if "ytd" not in str(col).lower():
-            keep_cols.append(col)
-    return df[keep_cols]
-
-
-def _fiscal_year_start(selected_year: int, fiscal_year_end_month: int) -> pd.Timestamp:
-    """First day of fiscal year `selected_year` given the month it ends in."""
-    fiscal_year_end = pd.Timestamp(year=selected_year, month=fiscal_year_end_month, day=1) + pd.offsets.MonthEnd(0)
-    return (fiscal_year_end - pd.DateOffset(months=11)).replace(day=1)
-
-
-def _filings_on_or_after(filings: list, cutoff: pd.Timestamp) -> list:
-    return [f for f in filings if pd.Timestamp(f.filing_date) >= cutoff]
-
-
-def get_available_years(symbol: str) -> list:
-    """Every distinct year across a company's 10-Q and 10-K filings, newest first."""
-    quarterly_filings = sec_financials.get_recent_filings(symbol, "10-Q")
-    annual_filings = sec_financials.get_recent_filings(symbol, "10-K")
-    years = {_adjusted_date(f.filing_date).year for f in quarterly_filings + annual_filings}
-    return sorted(years, reverse=True)
-
-
 def extract_income_statements(symbol: str, fiscal_year_end_month: int, selected_year: int, on_progress=None):
-    """
-    Build one Excel workbook covering every 10-Q/10-K filing for
-    `symbol` from the start of fiscal year `selected_year` onward.
-
-    on_progress(current, total, period_label), if given, is called
-    after each filing is processed — for driving a progress bar with
-    a status label.
-
-    Returns (workbook_bytes, sheet_names); workbook_bytes is None if
-    nothing could be extracted.
-    """
-    quarterly_filings = sec_financials.get_recent_filings(symbol, "10-Q")
-    annual_filings = sec_financials.get_recent_filings(symbol, "10-K")
-
-    fiscal_year_start = _fiscal_year_start(selected_year, fiscal_year_end_month)
-    selected_quarterly = _filings_on_or_after(quarterly_filings, fiscal_year_start)
-    selected_annual = _filings_on_or_after(annual_filings, fiscal_year_start)
-
-    if not selected_quarterly and not selected_annual:
-        return None, []
-
-    # Interleave both filing types chronologically, newest first.
-    combined = [(f, "10-Q") for f in selected_quarterly] + [(f, "10-K") for f in selected_annual]
-    combined.sort(key=lambda pair: pair[0].filing_date, reverse=True)
-
-    total = len(combined)
-    all_sheets = {}
-    for i, (f, form_type) in enumerate(combined):
-        period_label = format_period_label(f.filing_date)
-        if form_type == "10-K":
-            period_label += " (FY)"
-
-        try:
-            income_raw = fetch_income_statement(f)
-            cleaned = sec_financials.clean_income_statement(income_raw)
-            if form_type == "10-Q":
-                cleaned = remove_ytd_columns(cleaned)
-            cleaned = reformat_statement_columns(cleaned)
-            all_sheets[period_label] = cleaned
-        except Exception:
-            pass  # skip this filing; caller can compare returned sheet_names to spot gaps
-
-        if on_progress:
-            on_progress(i + 1, total, period_label)
-
-    if not all_sheets:
-        return None, []
-
-    return sec_financials.build_workbook_bytes(all_sheets), list(all_sheets.keys())
+    return utils.extract_statements(
+        symbol, fiscal_year_end_month, selected_year,
+        fetch_fn=fetch_income_statement,
+        clean_fn=sec_financials.clean_income_statement,
+        strip_ytd=True,
+        on_progress=on_progress,
+    )
