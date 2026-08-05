@@ -41,25 +41,26 @@ if st.session_state.page == "about":
 
     st.markdown("""
 This app pulls financial statements directly from SEC EDGAR and lets you export them to Excel.
-
+ 
 **Financial Statement Extraction** — pick one or more companies, choose 10-Q or 10-K,
 select a filing period per company, then extract. Produces a `.zip` with three workbooks:
 Income Statement, Cash Flow Statement, and Balance Sheet.
-
+ 
 **Historical Financials** — pick a company and a starting fiscal year, then download
 Income Statement, Balance Sheet, or Cash Flow Statement as a single workbook covering
 every 10-Q and 10-K filed from that year to the present — one sheet per filing, newest
 to oldest.
-
+ 
 **Companies List** — a read-only view of every company in the database, along with their
 latest reported quarter and next expected earnings date.
-
+ 
 **Managing companies** — this app doesn't add or remove companies itself. Run
 `python companies_db.py` from the project folder to add a company by symbol — the name and
-fiscal year end month are looked up automatically via yfinance, and you'll only be asked to
-enter either manually if that lookup fails. The same tool lets you remove a company, list
-all companies, or refresh existing entries.
+fiscal year end month are looked up automatically via yfinance. If either lookup fails,
+you'll be prompted to enter it manually. The same tool lets you remove a company, list all
+companies, or refresh existing entries.
 """)
+ 
 
 # ==================================================================
 # Companies List — read-only; manage entries via companies_db.py
